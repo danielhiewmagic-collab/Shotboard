@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shotboard Rescue</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:#F5F2EC;color:#26211B;font-family:-apple-system,system-ui,sans-serif;padding:20px;line-height:1.5}
+h1{font-size:20px;margin-bottom:4px}
+.sub{font-size:13px;color:#8B8276;margin-bottom:18px}
+.card{background:#fff;border:1px solid #E5DFD4;border-radius:12px;padding:14px;margin-bottom:12px}
+.k{font-family:ui-monospace,monospace;font-size:12px;color:#8B8276}
+.v{font-size:22px;font-weight:700;margin-top:2px}
+button{
+  width:100%;padding:14px;border-radius:11px;border:none;
+  font-size:15px;font-weight:700;font-family:inherit;margin-bottom:9px;
+  background:#fff;border:1px solid #E5DFD4;color:#26211B;
+}
+button.p{background:#FF3B30;color:#fff;border-color:#FF3B30}
+button.d{color:#FF3B30;border-color:rgba(255,59,48,.4)}
+button:disabled{opacity:.4}
+#log{
+  font-family:ui-monospace,monospace;font-size:11.5px;white-space:pre-wrap;
+  background:#fff;border:1px solid #E5DFD4;border-radius:12px;padding:12px;
+  margin-top:12px;max-height:38vh;overflow:auto;
+}
+.warn{font-size:12.5px;color:#8B8276;margin:10px 0 16px}
+</style>
+</head>
+<body>
+
+<h1>Shotboard Rescue</h1>
+<div class="sub">Repairs storage without loading the app.</div>
+
+<div class="card">
+  <div class="k">SAVED DATA</div>
+  <div class="v" id="size">checking…</div>
+  <div class="k" id="detail"></div>
+</div>
+
+<button class="p" id="dl">1 · Download raw backup first</button>
+<button id="strip">2 · Strip videos &amp; repair</button>
+<button id="shrink">3 · Also shrink large images</button>
+<button class="d" id="wipe">Wipe everything (last resort)</button>
+
+<div class="card" style="margin-top:18px">
+  <div class="k">REPAIR A BACKUP FILE</div>
+  <div style="font-size:13px;margin-top:6px;color:#8B8276">
+    Strips videos out of a too-large .json backup so it can be imported.
+    Works on files of any size — nothing is loaded whole.
+  </div>
+</div>
+<button class="p" id="fix">Choose backup file to repair</button>
+<input type="file" id="fixFile" accept="application/json,.json" style="display:none">
+<div id="fixbar" style="display:none;height:6px;border-radius:3px;background:#E5DFD4;overflow:hidden;margin-bottom:10px">
+  <i id="fixfill" style="display:block;height:100%;width:0;background:#FF3B30"></i>
+</div>
+
+<div class="warn">
+Run 1 before anything else. Step 2 fixes the usual cause — videos stored inside the
+save file. After it says DONE, open the app again.
+</div>
+
+<div id="log">ready</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const log=m=>{$('log').textContent+='\n'+m;$('log').scrollTop=1e6;};
+let db=null, state=null, raw='';
+
+function open(){
+  return new Promise((res,rej)=>{
+    const r=indexedDB.open('shotboard');
+    r.onsuccess=()=>{db=r.result;res();};
+    r.onerror=()=>rej(r.error);
+  });
+}
+function get(store,key){
+  return new Promise((res,rej)=>{
+    try{
+      const t=db.transaction(store).objectStore(store).get(key);
+      t.onsuccess=()=>res(t.result);t.onerror=()=>rej(t.error);
+    }catch(e){rej(e);}
+  });
+}
+function put(store,key,val){
+  return new Promise((res,rej)=>{
+    try{
+      const t=db.transaction(store,'readwrite').objectStore(store).put(val,key);
+      t.onsuccess=()=>res();t.onerror=()=>rej(t.error);
+    }catch(e){rej(e);}
+  });
+}
+
+(async function(){
+  try{
+    await open();
+    log('database opened');
+    raw = await get('kv','state') || localStorage.getItem('shotboard.v1') || '';
+    if(!raw){$('size').textContent='no data found';log('nothing stored');return;}
+    const mb=(raw.length/1048576);
+    $('size').textContent=mb.toFixed(1)+' MB';
+    log('state size: '+mb.toFixed(2)+' MB');
+    if(mb>25)log('WARNING: this is very large — videos are the usual cause');
+    // count without fully parsing when huge
+    const vids=(raw.match(/"t":"video"/g)||[]).length;
+    const imgs=(raw.match(/"t":"img"/g)||[]).length;
+    $('detail').textContent=imgs+' images · '+vids+' videos on boards';
+    log(imgs+' board images, '+vids+' board videos');
+  }catch(e){
+    log('ERROR: '+e);
+    $('size').textContent='could not read';
+  }
+})();
+
+$('dl').onclick=()=>{
+  if(!raw){log('nothing to download');return;}
+  try{
+    const b=new Blob([raw],{type:'application/json'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(b);
+    a.download='shotboard_RAW_'+new Date().toISOString().slice(0,10)+'.json';
+    a.click();
+    log('raw backup downloaded — keep this file safe');
+  }catch(e){log('download failed: '+e);}
+};
+
+async function loadState(){
+  if(state)return state;
+  log('parsing…');
+  state=JSON.parse(raw);
+  log('parsed OK');
+  return state;
+}
+
+$('strip').onclick=async()=>{
+  try{
+    const S=await loadState();
+    let n=0;
+    (S.projects||[]).forEach(p=>(p.pages||[]).forEach(pg=>{
+      const before=(pg.items||[]).length;
+      pg.items=(pg.items||[]).filter(it=>it.t!=='video');
+      n+=before-(pg.items||[]).length;
+    }));
+    log('removed '+n+' videos');
+    const out=JSON.stringify(S);
+    await put('kv','state',out);
+    try{localStorage.setItem('shotboard.v1',out);}catch(e){}
+    log('saved: '+(out.length/1048576).toFixed(2)+' MB');
+    log('DONE — open the app now');
+    $('size').textContent=(out.length/1048576).toFixed(1)+' MB';
+    raw=out;
+  }catch(e){log('ERROR: '+e);}
+};
+
+$('shrink').onclick=async()=>{
+  try{
+    const S=await loadState();
+    const shrinkOne=src=>new Promise(res=>{
+      if(typeof src!=='string'||!src.startsWith('data:image')){res(src);return;}
+      const im=new Image();
+      im.onload=()=>{
+        const max=1200;
+        const sc=Math.min(max/im.width,max/im.height,1);
+        if(sc>=1){res(src);return;}
+        const c=document.createElement('canvas');
+        c.width=Math.round(im.width*sc);c.height=Math.round(im.height*sc);
+        c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+        res(c.toDataURL('image/jpeg',0.8));
+      };
+      im.onerror=()=>res(src);
+      im.src=src;
+    });
+    let count=0;
+    for(const p of (S.projects||[])){
+      for(const pg of (p.pages||[])){
+        for(const it of (pg.items||[])){
+          if(it.t==='img'){it.src=await shrinkOne(it.src);count++;
+            if(count%10===0)log('shrunk '+count+'…');}
+        }
+      }
+      for(const x of (p.inspo||[])){x.src=await shrinkOne(x.src);count++;}
+    }
+    for(const x of ((S.playbook&&S.playbook.shots)||[])){x.src=await shrinkOne(x.src);count++;}
+    const out=JSON.stringify(S);
+    await put('kv','state',out);
+    try{localStorage.setItem('shotboard.v1',out);}catch(e){}
+    log('processed '+count+' images → '+(out.length/1048576).toFixed(2)+' MB');
+    log('DONE — open the app now');
+    $('size').textContent=(out.length/1048576).toFixed(1)+' MB';
+    raw=out;
+  }catch(e){log('ERROR: '+e);}
+};
+
+/* ---- Streaming repair: remove video payloads from a huge backup file ---- */
+$('fix').onclick=()=>$('fixFile').click();
+$('fixFile').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';
+  if(!f)return;
+  $('fixbar').style.display='block';
+  log('repairing '+(f.size/1048576).toFixed(1)+' MB file…');
+
+  const parts=[];       // kept text fragments (Blob assembles without one huge string)
+  let carry='';
+  let inVid=false;
+  let removed=0, readBytes=0;
+
+  const flushKeep=(txt)=>{ if(txt)parts.push(txt); };
+
+  const processChunk=(chunk)=>{
+    let buf=carry+chunk;
+    carry='';
+    let out='';
+    let i=0;
+    while(i<buf.length){
+      if(inVid){
+        const q=buf.indexOf('"',i);
+        if(q===-1){ i=buf.length; break; }      // still inside the payload
+        inVid=false; i=q;                        // resume at the closing quote
+        continue;
+      }
+      const d=buf.indexOf('data:video',i);
+      if(d===-1){
+        // keep everything but hold back a small tail in case a token is split
+        const safe=Math.max(i,buf.length-24);
+        out+=buf.slice(i,safe);
+        carry=buf.slice(safe);
+        i=buf.length;
+        break;
+      }
+      out+=buf.slice(i,d);
+      inVid=true; removed++;
+      i=d+10;
+    }
+    flushKeep(out);
+  };
+
+  try{
+    if(f.stream){
+      const reader=f.stream().pipeThrough(new TextDecoderStream()).getReader();
+      while(true){
+        const {done,value}=await reader.read();
+        if(done)break;
+        readBytes+=value.length;
+        processChunk(value);
+        $('fixfill').style.width=Math.min(99,Math.round(readBytes/f.size*100))+'%';
+        await new Promise(r=>setTimeout(r,0));
+      }
+    }else{
+      // fallback: slice the file manually
+      const CH=4*1024*1024;
+      for(let off=0;off<f.size;off+=CH){
+        const txt=await f.slice(off,off+CH).text();
+        readBytes+=txt.length;
+        processChunk(txt);
+        $('fixfill').style.width=Math.min(99,Math.round(readBytes/f.size*100))+'%';
+        await new Promise(r=>setTimeout(r,0));
+      }
+    }
+    if(carry)parts.push(carry);
+    $('fixfill').style.width='100%';
+
+    const blob=new Blob(parts,{type:'application/json'});
+    log('removed '+removed+' video payload(s)');
+    log('new size: '+(blob.size/1048576).toFixed(2)+' MB');
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='shotboard_REPAIRED.json';
+    a.click();
+    log('DONE — import shotboard_REPAIRED.json in the app');
+  }catch(err){
+    log('ERROR: '+err);
+  }
+};
+
+$('wipe').onclick=async()=>{
+  if(!confirm('Delete ALL Shotboard data on this device?\n\nOnly do this if you have downloaded a backup.'))return;
+  if(!confirm('Really wipe? This cannot be undone.'))return;
+  try{
+    await put('kv','state','');
+    try{localStorage.removeItem('shotboard.v1');}catch(e){}
+    indexedDB.deleteDatabase('shotboard');
+    log('wiped — open the app and import your backup');
+  }catch(e){log('ERROR: '+e);}
+};
+</script>
+</body>
+</html>
